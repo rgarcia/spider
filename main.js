@@ -1,185 +1,181 @@
 var request = require('request')
-  , fs = require('fs')
-  , sys = require('sys')
-  , path = require('path')
-  , util = require('util')
-  , urlParse = require('url').parse
-  , urlResolve = require('url').resolve
-  , routes = require('routes')
-  , events = require('events')
-  , util = require('util')
-  , cheerio = require('cheerio')
-  ;
+    , path = require('path')
+    , urlParse = require('url').parse
+    , routes = require('routes')
+    , events = require('events')
+    , util = require('util')
+    , cheerio = require('cheerio')
+    ;
 
-var headers = 
-  { 'accept': "application/xml,application/xhtml+xml,text/html;q=0.9,text/plain;q=0.8,image/png,*/*;q=0.5"
-  , 'accept-language': 'en-US,en;q=0.8'
-  , 'accept-charset':  'ISO-8859-1,utf-8;q=0.7,*;q=0.3'
-  }
+var headers = {
+    'accept': "application/xml,application/xhtml+xml,text/html;q=0.9,text/plain;q=0.8,image/png,*/*;q=0.5"
+    , 'accept-language': 'en-US,en;q=0.8'
+    , 'accept-charset':  'ISO-8859-1,utf-8;q=0.7,*;q=0.3'
+};
 
 var firefox = 'Mozilla/5.0 (Macintosh; U; Intel Mac OS X 10_6_4; en-US) ' +
-              'AppleWebKit/534.7 (KHTML, like Gecko) Chrome/7.0.517.41 Safari/534.7'
+    'AppleWebKit/534.7 (KHTML, like Gecko) Chrome/7.0.517.41 Safari/534.7';
 
 var copy = function (obj) {
-  var n = {}
-  for (i in obj) {
-    n[i] = obj[i];
-  }
-  return n
-}
-
-var Context = process.binding('evals').Context,
-    Script = process.binding('evals').Script;
+    var n = {};
+    for (i in obj) {
+        n[i] = obj[i];
+    }
+    return n
+};
 
 var debug = 1
-  , info = 50
-  , error = 100
-  ;
-  
-var isUrl = /^https?:/;  
-  
-var logLevels = {debug:debug, info:info, error:error, 1:'debug', 50:'info', 100:'error'}
+    , info = 50
+    , error = 100
+    ;
 
-function MemoryCache () {
-  this.cache = {};
+var logLevels = {debug:debug, info:info, error:error, 1:'debug', 50:'info', 100:'error'};
+
+function MemoryCache() {
+    this.cache = {};
 }
 MemoryCache.prototype.get = function (url, cb) {
-  if (!this.cache[url]) return cb(null);
-  cb({headers:this.cache[url].headers, body:this.cache[url].body.toString()});
-}
-MemoryCache.prototype.set = function (url, headers, body) {
-  this.cache[url] = {headers:headers, body:new Buffer(body)};
-}
-MemoryCache.prototype.getHeaders = function (url, cb) {
-  if (!this.cache[url]) return cb(null);
-  cb(this.cache[url].headers);
-}
+    if (!this.cache[url]) return cb(null);
+    cb(this.cache[url].response);
+};
+MemoryCache.prototype.set = function (url, response) {
+    this.cache[url] = {response:response};
+};
 
-function NoCache () {};
-NoCache.prototype.get = function (url, cb) { cb(null) };
-NoCache.prototype.getHeaders = function (url, cb) {cb(null)};
-NoCache.prototype.set = function (url, headers, body) {};
+MemoryCache.prototype.getResponse = function (url, cb) {
+    if (!this.cache[url]) return cb(null);
+    cb(this.cache[url].response);
+};
 
-function Spider (options) {
-  this.maxSockets = options.maxSockets || 4;
-  this.userAgent = options.userAgent || firefox;
-  this.cache = options.cache || new NoCache();
-  this.pool = options.pool || {maxSockets: options.maxSockets};
-  this.options = options;
-  this.currentUrl = null;
-  this.routers = {};
-  this.urls = [];
+function NoCache() {
 }
-util.inherits(Spider, events.EventEmitter)
-Spider.prototype.get = function (url, referer) {
-  if ( !url ) return;
-  var self = this
-    , h = copy(headers)
-    ;
-  referer = referer || this.currentUrl;  
-  
-  url = url.slice(0, (url.indexOf('#') === -1) ? url.length : url.indexOf('#'))
-  
-  if (this.urls.indexOf(url) !== -1) {
-    // Already handled this request
-    this.emit('log', debug, 'Already received one get request for '+url+'. skipping.')
-    return this;
-  } 
-  this.urls.push(url);
-  
-  var u = urlParse(url);
-  if (!this.routers[u.host]) {
-    this.emit('log', debug, 'No routes for host: '+u.host+'. skipping.')
-    return this;
-  }
-  if (!this.routers[u.host].match(u.href.slice(u.href.indexOf(u.host)+u.host.length))) {
-    this.emit('log', debug, 'No routes for path '+u.href.slice(u.href.indexOf(u.host)+u.host.length)+'. skipping.')
-    return this;
-  }
+NoCache.prototype.get = function (url, cb) {
+    cb(null)
+};
 
-  if (referer) h.referer = referer;
-  h['user-agent'] = this.userAgent;
-  
-  this.cache.getHeaders(url, function (c) {
-    if (c) {
-      if (c['last-modifed']) {
-        h['if-modified-since'] = c['last-modified'];
-      }
-      if (c.etag) {
-        h['if-none-match'] = c.etag;
-      }
-    }
+NoCache.prototype.getResponse = function (url, cb) {
+    cb(null)
+};
 
-    request.get({url:url, headers:h, pool:self.pool}, function (e, resp, body) {
-      self.emit('log', debug, 'Response received for '+url+'.')
-      if ( e || !resp ) {
-        self.emit('log', debug, 'Error getting URL '+url);
-        return;
-      } else if (resp.statusCode === 304) {
-        self.cache.get(url, function (c_) {
-          self._handler(url, referer, {fromCache:true, headers:c_.headers, body:c_.body})
-        });
-        return;
-      } else if (resp.statusCode !== 200) {
-        self.emit('log', debug, 'Request did not return 200. '+url);
-        return;
-      } else if (!resp.headers['content-type'] || resp.headers['content-type'].indexOf('html') === -1) {
-        self.emit('log', debug, 'Content-Type does not match. '+url);
-        return;
-      }
-      self.cache.set(url, resp.headers, body);
-      self._handler(url, referer, {fromCache:false, headers:resp.headers, body:body});
-    })
-  });
-  return this;
-}
-Spider.prototype.route = function (hosts, pattern, cb) {
-  var self = this;
-  if (typeof hosts === 'string') {
-    hosts = [hosts];
-  }
-  hosts.forEach(function (host) {
-    if (!self.routers[host]) self.routers[host] = new routes.Router();
-    self.routers[host].addRoute(pattern, cb);
-  })
-  return self;
-}
-Spider.prototype._handler = function (url, referer, response) {
-  var u = urlParse(url)
-    , self = this
-    ;
-  if (this.routers[u.host]) {
-    var r = this.routers[u.host].match(u.href.slice(u.href.indexOf(u.host)+u.host.length));
-    r.spider = this;
-    r.response = response
-    r.url = u;
-    var $ = cheerio.load(response.body);
+NoCache.prototype.set = function () {
+};
 
-    this.currentUrl = url;
-    r.fn.call(r, $, url);
+function Spider(options) {
+    this.maxSockets = options.maxSockets || 4;
+    this.userAgent = options.userAgent || firefox;
+    this.cache = options.cache || new NoCache();
+    this.pool = options.pool || {maxSockets: options.maxSockets};
+    this.options = options;
     this.currentUrl = null;
-  }
+    this.routers = {};
+    this.urls = [];
 }
-Spider.prototype.log = function (level) {
-  if (typeof level === 'string') level = logLevels[level];
-  this.on('log', function (l, text) {
-    if (l >= level) {
-      console.log('['+(logLevels[l] || l)+']', text)
+util.inherits(Spider, events.EventEmitter);
+Spider.prototype.get = function (url, referer) {
+    if (!url) return;
+    var self = this
+        , h = copy(headers)
+        ;
+    referer = referer || this.currentUrl;
+
+    url = url.slice(0, (url.indexOf('#') === -1) ? url.length : url.indexOf('#'));
+
+    if (this.urls.indexOf(url) !== -1) {
+        // Already handled this request
+        this.emit('log', debug, 'Already received one get request for ' + url + '. skipping.');
+        return this;
     }
-  })
-  return this;
-}
+    this.urls.push(url);
 
-function ZombieSpider (options) {
-  var zombie = require('zombie');
-  this.browser = new zombie.Browser({ debug: options });
-  if (typeof options.runScripts !== 'undefined') {
-    options.runScripts = false;
-  }
-  this.browser.runScripts = options.runScripts;
+    var u = urlParse(url);
+    if (!this.routers[u.host]) {
+        this.emit('log', debug, 'No routes for host: ' + u.host + '. skipping.');
+        return this;
+    }
+    if (!this.routers[u.host].match(u.href.slice(u.href.indexOf(u.host) + u.host.length))) {
+        this.emit('log', debug, 'No routes for path ' + u.href.slice(u.href.indexOf(u.host) + u.host.length) + '. skipping.');
+        return this;
+    }
 
-  this.get = function () {};
+    if (referer) h.referer = referer;
+    h['user-agent'] = this.userAgent;
+
+    this.cache.getResponse(url, function (c) {
+        if (c) {
+            if (c['last-modifed']) {
+                h['if-modified-since'] = c['last-modified'];
+            }
+            if (c.etag) {
+                h['if-none-match'] = c.etag;
+            }
+        }
+
+        request.get({url:url, headers:h, pool:self.pool}, function (e, resp) {
+            self.emit('log', debug, 'Response received for ' + url + '.');
+            if (e || !resp) {
+                self.emit('log', debug, 'Error getting URL ' + url);
+                throw new Error("Failed to get response from: " + url);
+            } else if (resp.statusCode === 304) {
+                self.cache.get(url, function (c_) {
+                    c_.statusCode = 304;
+                    self._handler(url, referer, c_)
+                });
+            } else {
+                self.cache.set(url, resp);
+                self._handler(url, referer, resp);
+            }
+        })
+    });
+    return this;
+};
+Spider.prototype.route = function (hosts, pattern, cb) {
+    var self = this;
+    if (typeof hosts === 'string') {
+        hosts = [hosts];
+    }
+    hosts.forEach(function (host) {
+        if (!self.routers[host]) self.routers[host] = new routes.Router();
+        self.routers[host].addRoute(pattern, cb);
+    });
+    return self;
+};
+Spider.prototype._handler = function (url, referer, response) {
+    var u = urlParse(url);
+    if (this.routers[u.host]) {
+        var r = this.routers[u.host].match(u.href.slice(u.href.indexOf(u.host) + u.host.length));
+        r.spider = this;
+        r.response = response;
+        r.url = u;
+        var $ = cheerio.load(response.body);
+
+        this.currentUrl = url;
+        r.fn.call(r, $, url);
+        this.currentUrl = null;
+    }
+};
+Spider.prototype.log = function (level) {
+    if (typeof level === 'string') level = logLevels[level];
+    this.on('log', function (l, text) {
+        if (l >= level) {
+            console.log('[' + (logLevels[l] || l) + ']', text)
+        }
+    });
+    return this;
+};
+
+function ZombieSpider(options) {
+    var zombie = require('zombie');
+    this.browser = new zombie.Browser({ debug: options });
+    if (typeof options.runScripts !== 'undefined') {
+        options.runScripts = false;
+    }
+    this.browser.runScripts = options.runScripts;
+
+    this.get = function () {
+    };
 }
 util.inherits(ZombieSpider, Spider);
 
-module.exports = function (options) {return new Spider(options || {})}
+module.exports = function (options) {
+    return new Spider(options || {})
+};
